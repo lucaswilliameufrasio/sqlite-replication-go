@@ -603,13 +603,8 @@ func DecodeSnapshot(src io.Reader, dst io.Writer) (Header, error) {
 			return Header{}, fmt.Errorf("%w: unexpected page number %d, expected %d", ErrInvalidFile, pgno, expectedPage)
 		}
 		expectedPage = pgno + 1
-		lz4Reader := lz4.NewReader(reader)
-		if _, err := io.ReadFull(lz4Reader, page); err != nil {
+		if err := readLZ4Page(reader, page); err != nil {
 			return Header{}, fmt.Errorf("read LZ4 page %d: %w", pgno, err)
-		}
-		var extra [1]byte
-		if n, err := lz4Reader.Read(extra[:]); n != 0 || err != io.EOF {
-			return Header{}, fmt.Errorf("%w: invalid LZ4 page frame %d", ErrInvalidFile, pgno)
 		}
 		_, _ = hash.Write(page)
 		rolling ^= pageChecksum(pgno, page)
@@ -698,13 +693,8 @@ func DecodeDelta(src io.Reader) (Header, []Page, uint64, error) {
 		}
 		previousPage = pageNumber
 
-		lz4Reader := lz4.NewReader(reader)
-		if _, err := io.ReadFull(lz4Reader, pageData); err != nil {
+		if err := readLZ4Page(reader, pageData); err != nil {
 			return Header{}, nil, 0, fmt.Errorf("read compressed LTX delta page %d: %w", pageNumber, err)
-		}
-		var extra [1]byte
-		if n, err := lz4Reader.Read(extra[:]); n != 0 || err != io.EOF {
-			return Header{}, nil, 0, fmt.Errorf("%w: invalid compressed LTX delta page %d", ErrInvalidFile, pageNumber)
 		}
 		_, _ = hash.Write(pageData)
 		pages = append(pages, Page{PageNumber: pageNumber, Data: append([]byte(nil), pageData...)})
@@ -839,4 +829,100 @@ func writeFull(dst io.Writer, b []byte) error {
 func writeZeros(dst io.Writer, length int) error {
 	zeros := make([]byte, length)
 	return writeFull(dst, zeros)
+}
+
+const (
+	lz4FrameMagic = 0x184D2204
+	// maxLZ4FrameSize bounds one page frame: the largest SQLite page (64 KiB)
+	// stored uncompressed, plus frame and block overhead.
+	maxLZ4FrameSize = 1<<16 + 1<<10
+)
+
+// readLZ4Page decodes exactly one LZ4 frame holding exactly one page.
+//
+// LTX interleaves its own page headers with single-page LZ4 frames, so the
+// decompressor must not read past the frame. A streaming lz4.Reader over the
+// shared reader is not safe for that: versions that support concatenated
+// frames probe for another frame magic after the end mark and consume bytes
+// that belong to LTX. The frame is therefore delimited here from its own
+// structure and handed to the decompressor as a closed buffer.
+func readLZ4Page(reader io.Reader, page []byte) error {
+	frame, err := readLZ4Frame(reader)
+	if err != nil {
+		return err
+	}
+	decoder := lz4.NewReader(bytes.NewReader(frame))
+	if _, err := io.ReadFull(decoder, page); err != nil {
+		return fmt.Errorf("%w: LZ4 frame is shorter than a page: %v", ErrInvalidFile, err)
+	}
+	var extra [1]byte
+	if n, err := decoder.Read(extra[:]); n != 0 || err != io.EOF {
+		return fmt.Errorf("%w: LZ4 frame does not hold exactly one page", ErrInvalidFile)
+	}
+	return nil
+}
+
+// readLZ4Frame consumes one complete LZ4 frame and nothing after it. It only
+// walks the frame layout; decompression and checksum verification stay with
+// the LZ4 implementation.
+func readLZ4Frame(reader io.Reader) ([]byte, error) {
+	frame := make([]byte, 0, 512)
+	take := func(count int) ([]byte, error) {
+		if count < 0 || len(frame)+count > maxLZ4FrameSize {
+			return nil, fmt.Errorf("%w: LZ4 page frame exceeds the size limit", ErrInvalidFile)
+		}
+		start := len(frame)
+		frame = append(frame, make([]byte, count)...)
+		if _, err := io.ReadFull(reader, frame[start:]); err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+		return frame[start:], nil
+	}
+	descriptor, err := take(6)
+	if err != nil {
+		return nil, err
+	}
+	if binary.LittleEndian.Uint32(descriptor[:4]) != lz4FrameMagic {
+		return nil, fmt.Errorf("%w: missing LZ4 frame magic", ErrInvalidFile)
+	}
+	flags := descriptor[4]
+	if flags>>6 != 1 || flags&0x02 != 0 {
+		return nil, fmt.Errorf("%w: unsupported LZ4 frame descriptor", ErrInvalidFile)
+	}
+	optional := 1 // header checksum
+	if flags&0x08 != 0 {
+		optional += 8 // content size
+	}
+	if flags&0x01 != 0 {
+		optional += 4 // dictionary ID
+	}
+	if _, err := take(optional); err != nil {
+		return nil, err
+	}
+	for {
+		word, err := take(4)
+		if err != nil {
+			return nil, err
+		}
+		size := binary.LittleEndian.Uint32(word)
+		if size == 0 {
+			break
+		}
+		blockBytes := int(size &^ (1 << 31))
+		if flags&0x10 != 0 {
+			blockBytes += 4 // block checksum
+		}
+		if _, err := take(blockBytes); err != nil {
+			return nil, err
+		}
+	}
+	if flags&0x04 != 0 {
+		if _, err := take(4); err != nil { // content checksum
+			return nil, err
+		}
+	}
+	return frame, nil
 }
