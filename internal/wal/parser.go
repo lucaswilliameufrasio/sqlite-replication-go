@@ -51,11 +51,19 @@ type Result struct {
 	CommittedFrameCount int
 	DatabaseSize        uint32
 	IncompleteTailBytes int
+	// StaleTailBytes counts bytes after the valid prefix that belong to a
+	// previous WAL generation (frames whose salts differ from the header).
+	// They are not part of the log. Callers that know how many frames SQLite
+	// considers valid must compare that count with Frames, because a
+	// corrupted salt inside the live log is indistinguishable from a stale
+	// tail at this layer.
+	StaleTailBytes int
 }
 
 // Scan validates one immutable byte slice containing a WAL header and frames.
-// A partial trailing frame is reported but not treated as committed. A fully
-// present invalid frame fails the entire scan closed.
+// A partial trailing frame is reported but not treated as committed. Frames
+// left over from a previous WAL generation end the valid prefix. Any other
+// fully present invalid frame fails the entire scan closed.
 func Scan(data []byte) (Result, error) {
 	if len(data) < headerSize {
 		return Result{}, fmt.Errorf("%w: incomplete header", ErrInvalidHeader)
@@ -109,10 +117,18 @@ func Scan(data []byte) (Result, error) {
 		databaseSize := binary.BigEndian.Uint32(frameHeader[4:8])
 		salt1 := binary.BigEndian.Uint32(frameHeader[8:12])
 		salt2 := binary.BigEndian.Uint32(frameHeader[12:16])
+		if salt1 != header.Salt1 || salt2 != header.Salt2 {
+			// SQLite restarts a fully checkpointed WAL by rewriting it from
+			// the start with new salts, without truncating the file. Frames
+			// of the previous generation stay behind the new ones; SQLite
+			// itself ends the log at the first frame whose salts differ from
+			// the header, and so does this scan.
+			result.StaleTailBytes = remaining
+			break
+		}
 		if pageNumber == 0 || pageNumber > maxPageNumber ||
-			(databaseSize != 0 && databaseSize > maxPageNumber) ||
-			salt1 != header.Salt1 || salt2 != header.Salt2 {
-			return Result{}, fmt.Errorf("%w at offset %d: page number or salt", ErrInvalidFrame, offset)
+			(databaseSize != 0 && databaseSize > maxPageNumber) {
+			return Result{}, fmt.Errorf("%w at offset %d: page number", ErrInvalidFrame, offset)
 		}
 
 		checksum1, checksum2 = walChecksum(frameHeader[:8], checksum1, checksum2, checksumOrder)
