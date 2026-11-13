@@ -19,4 +19,11 @@ covered by the commands above.
 
 The third-party notice and provenance review remains incomplete; see the
 [source evidence](https://github.com/lucaswilliameufrasio/sqlite-replication/tree/7541689719b137db44504a505aad518b9e6f8b08/docs/sbom/2026-11-05).
-No final license approval or package release is implied by this repository.
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Lucas Eufrasio.
+
+The fixtures under `conformance/fixtures` are synthetic data produced by the
+generators in the source repository; the LTX fixtures were encoded with
+[`superfly/ltx`](https://github.com/superfly/ltx) v0.4.0 (Apache-2.0) as the
+reference encoder. No third-party code is included in this module.
