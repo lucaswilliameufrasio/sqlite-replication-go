@@ -50,5 +50,8 @@ func FuzzScan(f *testing.F) {
 		if result.IncompleteTailBytes < 0 || result.IncompleteTailBytes >= int(frameSize) {
 			t.Fatalf("Scan returned invalid incomplete tail length %d", result.IncompleteTailBytes)
 		}
+		if result.StaleTailBytes < 0 || (result.StaleTailBytes != 0 && result.IncompleteTailBytes != 0) {
+			t.Fatalf("Scan returned inconsistent tails: stale=%d incomplete=%d", result.StaleTailBytes, result.IncompleteTailBytes)
+		}
 	})
 }

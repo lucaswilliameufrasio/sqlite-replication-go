@@ -204,7 +204,7 @@ func PositionFromWALPrefix(data []byte, prefixSize int64) (Position, error) {
 	if err != nil {
 		return Position{}, fmt.Errorf("validate WAL prefix: %w", err)
 	}
-	if scan.CommittedFrameCount != len(scan.Frames) || scan.IncompleteTailBytes != 0 {
+	if scan.CommittedFrameCount != len(scan.Frames) || scan.IncompleteTailBytes != 0 || scan.StaleTailBytes != 0 {
 		return Position{}, fmt.Errorf("WAL prefix does not end at a complete commit boundary")
 	}
 	return positionFromScan(scan), nil
